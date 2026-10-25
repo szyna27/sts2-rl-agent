@@ -469,7 +469,7 @@ with STS2GameClient(host="127.0.0.1", port=9002) as client:
         state = client.receive_state()
 
         if state["type"] == "combat_action":
-            # Use trained model or heuristic to decide
+            # Use the active decision system or heuristic to decide
             client.play_card(card_index=0, target_index=0)
             # or: client.end_turn()
 

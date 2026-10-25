@@ -2,8 +2,7 @@
 
 Translates the JSON state received from the C# bridge mod into the
 same flat float32 observation vector format used by the gym_env. This
-ensures the trained model receives inputs in the exact same encoding
-it was trained on.
+keeps bridge state encoding compatible with future decision systems.
 
 The observation format is defined in gym_env/observation.py:
   - Player state: hp/max_hp, block/50, energy/10, max_energy/10, stars/5 (5)
@@ -325,7 +324,7 @@ class StateAdapter:
         """Convert an action index to an action command dict.
 
         Args:
-            action: Action index from model.predict().
+            action: Action index from the decision system.
             state: Current game state (for reference if needed).
 
         Returns:

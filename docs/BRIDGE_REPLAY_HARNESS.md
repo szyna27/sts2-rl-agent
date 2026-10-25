@@ -134,7 +134,7 @@ You can also record directly from the existing bridge runner:
 
 ```bash
 python -m sts2_env.bridge.agent_runner \
-  --model-path models/combat_ppo.zip \
+  --verbose \
   --record-replay artifacts/run_trace.json \
   --replay-factory my_module:make_run_manager
 ```

@@ -10,7 +10,6 @@ Guide for contributing to the STS2 RL Agent project.
 
 - **Python 3.11+** (3.12 recommended)
 - **Git**
-- For training: NVIDIA GPU with CUDA support (optional but recommended)
 - For bridge mod development: .NET 9 SDK, Godot 4.5.1 Mono, Slay the Spire 2 (Steam)
 
 ### Install

@@ -19,8 +19,8 @@ STS2 游戏进程 (Godot + .NET 8)          Python Agent 进程
 │  └───────────────────────┘  │         │  └────────────┘  │
 │                             │         │        ↓         │
 │  ┌───────────────────────┐  │         │  ┌────────────┐  │
-│  │ Harmony Hooks:        │  │         │  │ MaskablePPO│  │
-│  │  CombatManager        │  │         │  │ 模型推理   │  │
+│  │ Harmony Hooks:        │  │         │  │ Decision   │  │
+│  │  CombatManager        │  │         │  │ system     │  │
 │  │  PlayCardAction       │  │         │  └────────────┘  │
 │  │  ActionQueueSet       │  │         │        ↓         │
 │  └───────────────────────┘  │         │  ┌────────────┐  │
@@ -263,33 +263,22 @@ class STS2GameClient:
         self.send_action({"type": "POTION", "slot": slot, "target_index": target_index})
 ```
 
-### Agent 运行循环
+### Bridge 客户端运行循环
 
 ```python
 # run_agent.py
-from sb3_contrib import MaskablePPO
 from sts2_client import STS2GameClient
-from sts2_env.gym_env.observation import encode_observation
 from sts2_env.gym_env.action_space import decode_action, compute_action_mask
 
-def run_agent(model_path: str, host: str = "127.0.0.1", port: int = 9002):
-    model = MaskablePPO.load(model_path)
+def run_agent(host: str = "127.0.0.1", port: int = 9002):
     client = STS2GameClient(host, port)
 
     while True:
         state = client.receive_state()
 
         if state["phase"] == "COMBAT_PLAY":
-            # 战斗中: 用训练好的模型决策
-            obs = encode_observation(state["combat_state"])
-            mask = compute_action_mask(state["combat_state"])
-            action, _ = model.predict(obs, action_masks=mask, deterministic=True)
-            decoded = decode_action(int(action), state["combat_state"])
-
-            if decoded["type"] == "end_turn":
-                client.end_turn()
-            else:
-                client.play_card(decoded["card_index"], decoded.get("target_index", -1))
+            # 战斗中: call the active decision system
+            client.send_action(decide_combat_action(state))
 
         elif state["phase"] == "CARD_REWARD":
             # 卡牌奖励: 暂用简单启发式

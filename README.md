@@ -22,10 +22,10 @@ A reinforcement learning agent for **Slay the Spire 2**, built on a high-perform
            |                                             |
            v                                             v
 +---------------------+                  +--------------------------+
-| Training Pipeline   |                  | Bridge to Real Game      |
-| MaskablePPO (SB3)   |                  | bridge_mod/ (C#/Godot)|
-| train_combat.py     |------model------>| agent_runner.py (Python) |
-| train_full_run.py   |                  | TCP JSON protocol        |
+| Decision system      |                  | Bridge to Real Game      |
+| gym_env/             |                  | bridge_mod/ (C#/Godot)|
+| future evolutionary  |------actions---->| agent_runner.py (Python) |
+| neural network       |                  | TCP JSON protocol        |
 +---------------------+                  +--------------------------+
 ```
 
@@ -43,7 +43,7 @@ A reinforcement learning agent for **Slay the Spire 2**, built on a high-perform
 | Potions implemented | 63 |
 | Playable characters | 5 (Ironclad, Silent, Defect, Necrobinder, Regent) |
 | Simulation speed | ~1,200 combats/sec, ~28,000 steps/sec |
-| Combat win rate (trained PPO) | ~92% (Act 1 Ironclad) |
+| Combat win rate | Not tracked while the new decision system is being designed |
 
 ## Quick Start
 
@@ -51,7 +51,6 @@ A reinforcement learning agent for **Slay the Spire 2**, built on a high-perform
 
 - **Python 3.11+** (3.12 recommended)
 - **pip** (included with Python)
-- For training: a CUDA-capable GPU is recommended but not required
 - For real-game bridge: .NET 9 SDK, Godot 4.5.1 Mono, Slay the Spire 2 (Steam)
 
 ### Install
@@ -62,9 +61,6 @@ cd sts2-rl-agent
 
 # Core simulator only
 pip install -e .
-
-# With training dependencies (PyTorch, SB3, sb3-contrib)
-pip install -e ".[train]"
 
 # With dev dependencies (pytest)
 pip install -e ".[dev]"
@@ -119,57 +115,16 @@ Then open <http://127.0.0.1:8765/>. The browser UI uses the same `RunManager`
 logic as the terminal version, but presents the run as clickable screens for
 map, combat, events, rewards, shop, rest sites, treasure, and boss relics.
 
-### Train a Combat Agent
-
-Train a MaskablePPO agent on single-combat encounters:
-
-```bash
-python scripts/train_combat.py \
-    --total-timesteps 500000 \
-    --n-envs 4 \
-    --output-dir output/combat_ppo
-```
-
-Key flags:
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--total-timesteps` | 500,000 | Total environment steps |
-| `--n-envs` | 4 | Parallel environments (use CPU cores) |
-| `--lr` | 3e-4 | Learning rate |
-| `--batch-size` | 256 | Minibatch size |
-| `--n-steps` | 2048 | Steps per rollout per env |
-| `--output-dir` | output/combat_ppo | Where to save models and logs |
-
-### Train a Full-Run Agent
-
-Train an agent that handles an entire run (combat + map + rewards + events):
-
-```bash
-python scripts/train_full_run.py \
-    --total-timesteps 1000000 \
-    --act-count 1 \
-    --n-envs 4 \
-    --output-dir output/run_ppo
-```
-
-The `--act-count` flag controls how many acts per episode (1 = Act 1 only, 3 = full game).
-
 ### Connect to Real Game
-
-After training, run the agent against the actual game:
 
 1. Build and install the bridge mod (see [docs/MOD_BUILD_GUIDE.md](docs/MOD_BUILD_GUIDE.md))
 2. Start Slay the Spire 2
-3. Run the agent:
+3. Run the bridge client (combat currently chooses a random legal action):
 
 ```bash
-python -m sts2_env.bridge.agent_runner \
-    --model-path output/combat_ppo/best_model/best_model.zip \
-    --verbose
+python -m sts2_env.bridge.agent_runner --verbose
 ```
 
-See [docs/AGENT_USAGE_GUIDE.md](docs/AGENT_USAGE_GUIDE.md) for details.
 
 ## Project Structure
 
@@ -178,8 +133,7 @@ sts2-rl-agent/
 |-- pyproject.toml                 # Package config, dependencies
 |-- scripts/
 |   |-- benchmark.py               # Throughput benchmark
-|   |-- train_combat.py            # Combat-only training
-|   +-- train_full_run.py          # Full-run training
+|   +-- benchmark.py              # Throughput benchmark
 |
 |-- sts2_env/                      # Python package (headless simulator)
 |   |-- core/                      # Combat engine
@@ -295,14 +249,13 @@ sts2-rl-agent/
 
 Following lessons from the STS1 RL community, this project uses a two-phase strategy:
 
-1. **Headless Simulator** (for training): A pure-Python reimplementation of STS2 combat and run mechanics, verified against the decompiled C# source. Runs at ~1,200 combats/second -- fast enough for millions of training episodes.
+1. **Headless Simulator**: A pure-Python reimplementation of STS2 combat and run mechanics, verified against the decompiled C# source. Runs at ~1,200 combats/second and exposes Gymnasium environments for future decision systems.
 
 2. **Bridge Mod** (for validation): A C# mod that hooks into the real game via Harmony, exposes state over TCP, and injects agent decisions. Includes 5-10x speed patches for faster real-game evaluation.
 
-### RL Algorithm
+### Decision-system interface
 
-- **MaskablePPO** from sb3-contrib (Stable Baselines 3)
-- **Invalid action masking**: Each step, the environment provides a boolean mask indicating which actions are legal (playable cards, valid targets). Illegal actions are zeroed out before policy sampling.
+- **Invalid action masking**: Each step, the environment provides a boolean mask indicating which actions are legal (playable cards, valid targets).
 - **Observation**: 217-dimensional float32 vector encoding player state, hand cards, pile summaries, and enemy state (each enemy carries up to 3 intent slots of 8 features: one-hot type (6 types incl. Heal) + damage + hits)
 - **Action space**: Discrete(115) for combat (end turn + cards + targets + potions), Discrete(157) for full run
 
@@ -327,7 +280,6 @@ Following lessons from the STS1 RL community, this project uses a two-phase stra
 | [DECOMPILED_ARCHITECTURE.md](DECOMPILED_ARCHITECTURE.md) | Decompiled C# analysis for simulator |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide, dev setup, adding content |
 | [docs/SIMULATOR_ARCHITECTURE.md](docs/SIMULATOR_ARCHITECTURE.md) | Python simulator internal architecture |
-| [docs/TRAINING_GUIDE.md](docs/TRAINING_GUIDE.md) | Comprehensive RL training guide |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | TCP bridge communication protocol |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | Current known issues and limitations |
 | [docs/MOD_BUILD_GUIDE.md](docs/MOD_BUILD_GUIDE.md) | How to build and install the bridge mod |
@@ -346,4 +298,3 @@ This project is for research and educational purposes. Slay the Spire 2 is the p
 - [spire-codex](https://github.com/ptrlrd/spire-codex) -- STS2 data extraction pipeline
 - [CommunicationMod](https://github.com/ForgottenArbiter/CommunicationMod) -- STS1 game bridge protocol design
 - [BaseLib-StS2](https://github.com/Alchyr/BaseLib-StS2) -- STS2 mod framework
-- [Stable Baselines 3](https://github.com/DLR-RM/stable-baselines3) -- RL training framework

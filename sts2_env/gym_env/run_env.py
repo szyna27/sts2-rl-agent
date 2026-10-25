@@ -46,7 +46,7 @@ Sparse: **+1** for winning the run, **-1** for death or timeout.
 
 Compatibility
 -------------
-Implements ``action_masks()`` for *sb3-contrib* ``MaskablePPO``.
+Implements ``action_masks()`` for decision systems that support legal-action masking.
 """
 
 from __future__ import annotations
@@ -233,7 +233,7 @@ class STS2RunEnv(gymnasium.Env):
     """Gymnasium environment for a complete STS2 run.
 
     Wraps :class:`RunManager` with a ``Discrete(157)`` action space and
-    action masking suitable for ``MaskablePPO``.
+    action masking suitable for policy or evolutionary decision systems.
 
     Parameters
     ----------
@@ -391,7 +391,7 @@ class STS2RunEnv(gymnasium.Env):
     def action_masks(self) -> np.ndarray:
         """Return a boolean mask over the unified discrete action space.
 
-        Required by *sb3-contrib* ``MaskablePPO``.
+        Used by decision systems that consume legal-action masks.
         """
         layout = _LAYOUT
         mask = np.zeros(layout.total_actions, dtype=np.int8)

@@ -187,9 +187,5 @@ green.
   already correct (self-removes at enemy side turn end). InfestedPrism
   constants corrected to 2/3 and Pulsate now applies VitalSpark (no
   Strength in C# PulsateMove). 15 parity tests cite C# lines.
-- Working tree also carries the pre-pull local change to
-  `bridge/agent_runner.py` (optional model_path → random agent), restored
-  from stash during agent work; not superseded by remote, kept uncommitted.
-
-Next work order: RL-environment scope verification (combat engine semantics,
+Next work order: decision-system scope verification (combat engine semantics,
 run flow, observation/action-space), then the remaining gaps above.

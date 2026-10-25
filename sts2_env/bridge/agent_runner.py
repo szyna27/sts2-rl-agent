@@ -1,17 +1,16 @@
-"""Agent runner: connects a trained RL model to the real STS2 game.
+"""Bridge runner: connects the real STS2 game to the Python client.
 
 Main loop:
   1. Connect to the game via TCP (bridge mod must be installed & running)
-  2. Load a trained MaskablePPO model
-  3. Receive game state -> encode observation -> model.predict -> send action
+  2. Receive game state -> choose an action -> send action
   4. Handle all game phases (combat, map, rewards, shop, rest, events)
 
 Usage:
-  python -m sts2_env.bridge.agent_runner --model-path models/combat_ppo.zip
-  python -m sts2_env.bridge.agent_runner --model-path models/combat_ppo.zip --port 9002
+  python -m sts2_env.bridge.agent_runner
+  python -m sts2_env.bridge.agent_runner --port 9002
 
-The agent uses the trained model for combat decisions and simple heuristics
-for non-combat decisions (map navigation, card rewards, etc.).
+Combat currently uses random valid actions; non-combat phases use simple
+heuristics. This keeps the bridge usable while a new decision system is built.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import numpy as np
 import sys
 from pathlib import Path
 import time
-from typing import Any
 
 from sts2_env.bridge.client import STS2GameClient
 from sts2_env.bridge.protocol import (
@@ -86,34 +84,9 @@ TREASURE_COLLECT_ACTION = "collect"
 BOSS_RELIC_PICK_ACTION = "pick_relic"
 
 
-def load_model(model_path: str) -> Any:
-    """Load a trained MaskablePPO model.
-
-    Args:
-        model_path: Path to the saved model (.zip file).
-
-    Returns:
-        Loaded MaskablePPO model instance.
-    """
-    try:
-        from sb3_contrib import MaskablePPO
-    except ImportError:
-        logger.error(
-            "sb3-contrib is required. Install with: pip install sb3-contrib"
-        )
-        raise
-
-    logger.info("Loading model from %s", model_path)
-    model = MaskablePPO.load(model_path)
-    logger.info("Model loaded successfully.")
-    return model
-
-
 def run_agent(
-    model_path: str,
     host: str = "127.0.0.1",
     port: int = 9002,
-    deterministic: bool = True,
     verbose: bool = False,
     record_replay_path: str | None = None,
     replay_factory: str | None = None,
@@ -124,13 +97,10 @@ def run_agent(
     until disconnected or interrupted.
 
     Args:
-        model_path: Path to saved MaskablePPO model.
         host: Bridge server host.
         port: Bridge server port.
-        deterministic: Whether to use deterministic action selection.
         verbose: Whether to log every action taken.
     """
-    model = load_model(model_path) if model_path else None
     adapter = StateAdapter()
 
     logger.info("Connecting to STS2 at %s:%d...", host, port)
@@ -139,7 +109,6 @@ def run_agent(
         client: STS2GameClient | BridgeReplayRecorder
         if record_replay_path is not None:
             metadata = {
-                "model_path": model_path,
                 "host": host,
                 "port": port,
             }
@@ -205,8 +174,8 @@ def run_agent(
                     continue
 
                 if phase in Phase.COMBAT_PHASES:
-                    # ---- Combat: use trained model or random ----
-                    obs = adapter.encode_observation(state)
+                    # Use random valid actions until the next decision system
+                    # is connected to the bridge.
                     mask = adapter.compute_action_mask(state)
 
                     # Ensure at least one action is valid
@@ -215,17 +184,8 @@ def run_agent(
                         client.end_turn()
                         continue
 
-                    if model is not None:
-                        action, _states = model.predict(
-                            obs,
-                            action_masks=mask,
-                            deterministic=deterministic,
-                        )
-                        action_int = int(action)
-                    else:
-                        # Random valid action
-                        valid_actions = np.where(mask)[0]
-                        action_int = int(np.random.choice(valid_actions))
+                    valid_actions = np.where(mask)[0]
+                    action_int = int(np.random.choice(valid_actions))
 
                     decoded = adapter.decode_action(action_int, state)
 
@@ -673,13 +633,8 @@ def _log_combat_action(
 def main() -> None:
     """CLI entry point for the agent runner."""
     parser = argparse.ArgumentParser(
-        description="Run a trained RL agent on the real STS2 game.",
+        description="Run the STS2 bridge client against the real game.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "--model-path",
-        default=None,
-        help="Path to the trained MaskablePPO model (.zip file). If omitted, uses random valid actions.",
     )
     parser.add_argument(
         "--host",
@@ -691,18 +646,6 @@ def main() -> None:
         type=int,
         default=9002,
         help="Bridge server port.",
-    )
-    parser.add_argument(
-        "--deterministic",
-        action="store_true",
-        default=True,
-        help="Use deterministic action selection (no exploration).",
-    )
-    parser.add_argument(
-        "--stochastic",
-        action="store_true",
-        default=False,
-        help="Use stochastic action selection (for diversity).",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -735,13 +678,9 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    deterministic = not args.stochastic
-
     run_agent(
-        model_path=args.model_path,
         host=args.host,
         port=args.port,
-        deterministic=deterministic,
         verbose=args.verbose,
         record_replay_path=args.record_replay,
         replay_factory=args.replay_factory,

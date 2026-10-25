@@ -96,24 +96,11 @@ _UNTARGETED_TYPES = {TargetTypeName.SELF, TargetTypeName.NONE, TargetTypeName.AL
 
 **Mitigation:** Reward shaping is available (`--reward-shaping` flag) but only provides small floor-progression bonuses. A fundamental redesign of the reward function or training approach (hierarchical RL, curriculum learning) is needed.
 
-### 8. Only Ironclad combat model trained
-
-**Severity:** Medium
-
-**Problem:** The combat training pipeline only creates Ironclad starter decks. All training and evaluation use the Ironclad character.
-
-**Impact:** The trained model is specific to Ironclad. It cannot play Silent, Defect, Necrobinder, or Regent effectively because:
-- Different starter decks and starting HP
-- Character-specific mechanics (orbs, stars, pets)
-- Different card pools with different effect distributions
-
-**Workaround:** The simulator supports all 5 characters (cards, powers, monsters are all implemented). Training scripts need to be extended to support character selection.
-
-### 9. Combat potion actions were missing from the RL action space
+### 8. Combat potion actions were missing from the decision action space
 
 **Status:** Fixed
 
-**Problem:** The combat action space originally only covered card plays and end turn, so the agent could not use potions strategically during combat.
+**Problem:** The combat action space originally only covered card plays and end turn, so a decision system could not use potions strategically during combat.
 
 **Fix:** The combat action space now includes fixed-width potion actions, `CombatState` can execute potion uses directly, and the bridge path serializes and decodes potion actions as explicit `POTION` commands.
 
@@ -130,7 +117,7 @@ _UNTARGETED_TYPES = {TargetTypeName.SELF, TargetTypeName.NONE, TargetTypeName.AL
 - selected Defect and Silent follow-up effects such as `Compact`, `WhiteNoise`, and `TheHunt`
 - wider relic-hook interactions outside the targeted parity suites
 
-**Impact:** The trained model may develop strategies that exploit simulator inaccuracies and fail to transfer to the real game. The bridge mod's real-game evaluation is the ground truth.
+**Impact:** A decision system may develop strategies that exploit simulator inaccuracies and fail to transfer to the real game. The bridge mod's real-game evaluation is the ground truth.
 
 ### 11. Reconnection timing issues
 

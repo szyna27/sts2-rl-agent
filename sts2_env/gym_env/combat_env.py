@@ -147,7 +147,7 @@ class STS2CombatEnv(gymnasium.Env):
         return obs, reward, terminated, truncated, info
 
     def action_masks(self) -> np.ndarray:
-        """Return the current action mask (for sb3-contrib MaskablePPO)."""
+        """Return the current mask of legal actions."""
         if self.combat is None or self._episode_ended:
             mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int8)
             mask[0] = 1

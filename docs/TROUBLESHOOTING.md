@@ -286,41 +286,6 @@ TaskHelper.RunSafely(async () => {
 
 ---
 
-## Training Issues
-
-### Training loss diverges or NaN
-
-**Symptom:** PPO training shows NaN losses or reward diverges to extreme values.
-
-**Cause:** Usually caused by too-large learning rate, too-small batch size, or observation values outside expected range.
-
-**Solution:** Use conservative hyperparameters to start:
-
-```bash
-python scripts/train_combat.py \
-    --lr 3e-4 \
-    --batch-size 256 \
-    --n-steps 2048 \
-    --ent-coef 0.01
-```
-
-Check that observation values are properly normalized (the observation encoder divides by fixed constants like HP/max_hp, block/50, energy/10).
-
----
-
-### Agent learns to always END_TURN
-
-**Symptom:** After training, the agent ends every turn immediately without playing any cards.
-
-**Cause:** The action mask might not be working correctly, or the reward signal is too sparse (only win/loss at episode end). With sparse reward, the agent finds END_TURN to be the "safest" action.
-
-**Solution:**
-1. Verify action masking: the mask should have card-play actions enabled when the player has energy and playable cards.
-2. Add reward shaping: small negative penalty for HP loss encourages the agent to play defensively rather than passively.
-3. Use entropy coefficient (`--ent-coef 0.01` or higher) to encourage exploration during training.
-
----
-
 ## Environment Issues
 
 ### "Must call reset() first" assertion

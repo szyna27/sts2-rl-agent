@@ -113,39 +113,18 @@ STS1 的先例项目：
 路线 A（Mod 桥接）——用于在真实游戏中验证 agent 效果
 ```
 
-## 5. RL 算法选择
+## 5. Decision-system design
 
-### 5.1 推荐：PPO + Invalid Action Masking
+旧的作者特定训练方案已移除。模拟器和 bridge 保留了实现新神经网络、
+并通过进化算法优化其参数或种群所需的接口。
 
-| 算法 | 适用性 | 说明 |
-|------|--------|------|
-| **PPO** | **推荐** | 策略梯度方法，稳定性好，已在多个 STS 项目验证有效 |
-| DQN | 不推荐 | 在大动作空间下不稳定，研究表明在 UNO/麻将/斗地主中效果差 |
-| AlphaZero | 不直接适用 | 设计用于完全信息博弈，STS 有隐藏信息（牌序、敌人意图） |
-| NFSP / CFR | 不推荐 | 计算成本高，更适合多人对抗博弈（如德州扑克） |
-| Two-Step RL | 值得探索 | 将问题分为构建期和战斗期两个阶段 |
-
-关键论文：[A Closer Look at Invalid Action Masking in Policy Gradient Algorithms](https://arxiv.org/abs/2006.14171)
-
-### 5.2 动作掩码（Action Masking）
+### 5.1 动作掩码（Action Masking）
 
 STS 每回合合法动作不同（手牌不同、目标不同、药水等），必须使用动作掩码：
 
 - 定义最大可能动作空间
 - 每步通过 `action_masks()` 返回布尔数组，将非法动作概率置零后重新归一化
-- sb3-contrib 提供 `MaskablePPO` 开箱即用
-
 注意：动作空间超过 ~1400 时可能有数值精度问题。
-
-## 6. RL 框架选择
-
-| 框架 | 推荐度 | 说明 |
-|------|--------|------|
-| **[SB3](https://github.com/DLR-RM/stable-baselines3) + [sb3-contrib](https://sb3-contrib.readthedocs.io/en/master/modules/ppo_mask.html)** | **入门首选** | 内置 MaskablePPO，API 简洁，PyTorch 后端，95% 代码覆盖率 |
-| [Ray RLlib](https://docs.ray.io/en/latest/rllib/) | 大规模训练 | 分布式训练，原生动作掩码支持，学习曲线较陡 |
-| [RLCard](https://rlcard.org/) | 参考设计 | 卡牌游戏 RL 专用工具包，状态格式标准化 |
-| [OpenSpiel](https://github.com/google-deepmind/open_spiel) | 研究参考 | DeepMind 出品，70+ 游戏环境，支持不完全信息博弈 |
-| [Gymnasium](https://gymnasium.farama.org/) | 接口标准 | 所有自定义环境都应实现 Gymnasium 接口 |
 
 ## 7. 观测空间设计
 
@@ -232,7 +211,6 @@ STS 每回合合法动作不同（手牌不同、目标不同、药水等），�
 
 | 文章 | 链接 |
 |------|------|
-| Creating an AI for Slay the Spire（PPO/A2C 实战） | [toypiper.com](https://www.toypiper.com/creating-an-ai-for-slay-the-spire/) |
 | Tackling UNO with RL | [Towards Data Science](https://towardsdatascience.com/tackling-uno-card-game-with-reinforcement-learning-fad2fc19355c/) |
 | Training an AI for Dominion（deck-building RL） | [ianwdavis.com](https://ianwdavis.com/dominion2.html) |
 
@@ -463,14 +441,14 @@ GET /api/stats               — 各类实体数量统计
 3. 实现 Gymnasium 接口（`reset()`, `step()`, `action_masks()`）
 4. 编写单元测试，与真实游戏行为对照验证
 
-### Phase 3：RL 训练
-1. 使用 SB3 + sb3-contrib 的 MaskablePPO
+### Phase 3：新决策系统
+1. 设计神经网络结构与进化优化流程
 2. 设计观测空间（flat vector，分段编码）
 3. 设计动作空间（固定大小 + 动作掩码）
 4. 实验 reward shaping 方案
-5. 先在简化场景训练（固定 deck、单场战斗），再扩展
+5. 先在简化场景评估（固定 deck、单场战斗），再扩展
 
 ### Phase 4：真实游戏验证
 1. 构建 C# Mod（Harmony hook + JSON 序列化 + TCP 通信）
-2. 在真实游戏中运行训练好的 agent
+2. 在真实游戏中运行新决策系统
 3. 对比模拟器与真实游戏的行为差异，迭代修正

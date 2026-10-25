@@ -333,7 +333,7 @@ Single-combat training environment.
 
 - **Observation:** `Box(low=-1, high=10, shape=(217,), dtype=float32)`
 - **Action space:** `Discrete(115)` = 1 end_turn + 10 untargeted card actions + 50 targeted card actions + 54 potion actions (`9 slots * (1 untargeted + 5 enemy targets)`)
-- **Action masking:** `action_masks()` returns `int8[115]` marking legal actions. Required by `MaskablePPO`.
+- **Action masking:** `action_masks()` returns `int8[115]` marking legal actions for decision systems.
 
 On `reset()`:
 1. Create Ironclad starter deck
