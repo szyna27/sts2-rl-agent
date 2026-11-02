@@ -13,6 +13,9 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
 ]
+notebook = [
+    "matplotlib>=3.8",
+]
 
 [tool.setuptools.packages.find]
 include = ["sts2_env*"]

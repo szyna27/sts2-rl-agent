@@ -66,6 +66,20 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
+### Compare Combat Heuristics
+
+Install the notebook dependency and open [`combat_heuristics.ipynb`](combat_heuristics.ipynb)
+in Jupyter or VS Code:
+
+```bash
+uv sync --extra notebook
+```
+
+The notebook runs one fixed encounter 1000 times with the same randomly
+generated seed list for `block_first`, `attack_first`, and
+`block_without_wasting`, then plots horizontal, color-coded boxplots of
+cumulative player HP loss.
+
 ### Run Benchmark
 
 Measure simulation throughput with random actions:
