@@ -207,6 +207,7 @@ def apply_damage(
         killed_targets = []
         for damage_result in damage_results:
             combat.record_damage_event(dealer, damage_result.target, props, damage_result.unblocked_damage)
+            combat.record_damage_result(dealer, damage_result)
         if was_block_broken:
             for power in list(target.powers.values()):
                 on_block_broken = getattr(power, "on_block_broken", None)

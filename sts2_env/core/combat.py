@@ -72,6 +72,7 @@ from sts2_env.potions.base import PotionInstance
 from sts2_env.relics.base import RelicId
 
 if TYPE_CHECKING:
+    from sts2_env.core.damage import DamageResult
     from sts2_env.monsters.state_machine import MonsterAI
     from sts2_env.relics.base import RelicId, RelicInstance
     from sts2_env.run.run_state import PlayerState
@@ -180,6 +181,8 @@ class CombatState:
         self.in_play_phase: bool = False
         self._damage_events_this_turn: list[tuple[Creature | None, Creature, ValueProp]] = []
         self._damage_events_combat: list[tuple[Creature | None, Creature, ValueProp, int]] = []
+        self._damage_results_combat: list[tuple[Creature | None, DamageResult]] = []
+        self._block_clear_events_combat: list[tuple[Creature, int]] = []
         self._block_events_this_turn: list[tuple[Creature, ValueProp, object | None]] = []
         self._draw_events_this_turn: list[tuple[Creature, CardInstance, bool]] = []
         self._draw_events_combat: list[Creature] = []
@@ -813,6 +816,8 @@ class CombatState:
         self.primary_player.stars = 0
         self._pending_retain_count = {}
         self._damage_events_combat = []
+        self._damage_results_combat = []
+        self._block_clear_events_combat = []
         self._draw_events_combat = []
         self._generated_cards_combat = []
         self._orb_channel_events_combat = []
@@ -2335,6 +2340,16 @@ class CombatState:
     ) -> None:
         self._damage_events_this_turn.append((dealer, target, props))
         self._damage_events_combat.append((dealer, target, props, unblocked_damage))
+
+    def record_damage_result(
+        self,
+        dealer: Creature | None,
+        result: DamageResult,
+    ) -> None:
+        self._damage_results_combat.append((dealer, result))
+
+    def record_block_clear(self, creature: Creature, amount: int) -> None:
+        self._block_clear_events_combat.append((creature, amount))
 
     def count_powered_hits_this_turn(self, dealer: Creature, target: Creature) -> int:
         return sum(

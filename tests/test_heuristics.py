@@ -8,6 +8,7 @@ from sts2_env.heuristics import (
     choose_heuristic_action,
     incoming_attack_damage,
     evaluate_heuristics,
+    show_combat,
     simulate_combat,
 )
 
@@ -31,6 +32,41 @@ def test_heuristics_produce_a_complete_trace():
     assert trace.turns
     assert len(trace.turns) == len(trace.lost_health)
     assert trace.lost_health[0] == 0
+
+
+def test_show_combat_prints_turn_hand_actions_and_totals(capsys):
+    turns = show_combat(
+        setup_shrinker_beetle_weak,
+        seed=7,
+        heuristic="attack_first",
+        max_steps=100,
+    )
+
+    output = capsys.readouterr().out
+    assert turns
+    assert turns[0].hand
+    assert any(turn.played_cards for turn in turns)
+    assert any(turn.damage_dealt > 0 for turn in turns)
+    assert any(turn.debuff_amount > 0 for turn in turns)
+    assert "Ręka:" in output
+    assert "Zagrane karty:" in output
+    assert "Zablokowane obrażenia:" in output
+    assert "Zadane obrażenia:" in output
+    assert "Otrzymane obrażenia:" in output
+    assert "Zmarnowany blok:" in output
+    assert "Buffy (suma:" in output
+    assert "Debuffy (suma:" in output
+    assert "Suma:" in output
+    assert all(
+        value >= 0
+        for turn in turns
+        for value in (
+            turn.blocked_damage,
+            turn.damage_dealt,
+            turn.damage_received,
+            turn.wasted_block,
+        )
+    )
 
 
 def test_batch_evaluation_reuses_the_same_seed_set():

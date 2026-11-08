@@ -166,7 +166,12 @@ class Creature:
                 result = p.should_clear_block(self, self)
                 if result is False:
                     return
+        cleared = self.block
         self.block = 0
+        if cleared > 0 and combat is not None:
+            record_block_clear = getattr(combat, "record_block_clear", None)
+            if callable(record_block_clear):
+                record_block_clear(self, cleared)
 
     def get_power_amount(self, power_id: PowerId) -> int:
         p = self.powers.get(power_id)

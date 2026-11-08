@@ -1,0 +1,19 @@
+{
+  "character_id": "Ironclad",
+  "encounters": [
+    "setup_corpse_slugs_weak",
+    "setup_seapunk_weak",
+    "setup_sludge_spinner_weak",
+    "setup_toadpoles_weak"
+  ],
+  "reward_config": {
+    "damage_dealt": 1.0,
+    "damage_received": -3.0,
+    "win": 50.0,
+    "death": -100.0,
+    "per_turn": -5.0,
+    "wasted_block": -0.5
+  },
+  "seed": 20261108,
+  "total_timesteps": 200192
+}

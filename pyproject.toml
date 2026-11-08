@@ -16,6 +16,10 @@ dev = [
 notebook = [
     "matplotlib>=3.8",
 ]
+rl = [
+    "sb3-contrib>=2.6.0",
+    "tensorboard>=2.14.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["sts2_env*"]
