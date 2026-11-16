@@ -133,11 +133,41 @@ map, combat, events, rewards, shop, rest sites, treasure, and boss relics.
 
 1. Build and install the bridge mod (see [docs/MOD_BUILD_GUIDE.md](docs/MOD_BUILD_GUIDE.md))
 2. Start Slay the Spire 2
-3. Run the bridge client (combat currently chooses a random legal action):
+3. Run the bridge client. Without model paths, combat uses random legal actions
+   and non-combat decisions use the existing heuristics:
 
 ```bash
 python -m sts2_env.bridge.agent_runner --verbose
 ```
+
+### Train the Metagame Model
+
+The metagame state-value network scores simulated destination states for map,
+card, shop, event, rest-site, and relic choices. Train it after training a
+combat policy; the supplied combat policy remains frozen for every training
+run:
+
+```bash
+uv sync --extra rl
+python scripts/train_metagame.py \
+  --combat-model models/combat_maskable_ppo_ironclad.zip \
+  --episodes 1000 \
+  --output models/metagame_state_value.pt
+```
+
+For an initial baseline, pass `--combat-heuristic attack_first` instead of
+`--combat-model`. To play the real game with both models:
+
+```bash
+python -m sts2_env.bridge.agent_runner \
+  --combat-model models/combat_maskable_ppo_ironclad.zip \
+  --metagame-model models/metagame_state_value.pt \
+  --verbose
+```
+
+The simulator currently runs through its three implemented acts and does not
+model a Heart encounter. Metagame checkpoints include their feature schema and
+training settings; incompatible card/relic catalogs are rejected at load time.
 
 
 ## Project Structure
@@ -212,6 +242,9 @@ sts2-rl-agent/
 |   |   |-- observation.py         # State -> 217-dim float32 vector
 |   |   |-- action_space.py        # Action encoding + masking
 |   |   +-- reward.py              # Reward shaping
+|   |
+|   |-- metagame.py                # State-value model and destination-state evaluator
+|   |-- metagame_training.py       # Full-run training with frozen combat policy
 |   |
 |   +-- bridge/                    # Real-game connection
 |       |-- client.py              # TCP client

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Iterator
 
 from sts2_env.core.card_pools import (
     CHARACTER_CARD_POOLS_BY_ID,
@@ -562,3 +564,14 @@ def new_card_instance_id_after(cards: Iterable[object]) -> int:
 def reset_instance_counter() -> None:
     global _next_instance_id
     _next_instance_id = 0
+
+
+@contextmanager
+def preserve_instance_counter() -> Iterator[None]:
+    """Prevent a speculative simulation from consuming live card IDs."""
+    global _next_instance_id
+    counter = _next_instance_id
+    try:
+        yield
+    finally:
+        _next_instance_id = counter

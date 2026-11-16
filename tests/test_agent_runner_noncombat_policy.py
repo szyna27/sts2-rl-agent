@@ -1,7 +1,11 @@
 """Tests for bridge agent non-combat choices."""
 
+import numpy as np
+import pytest
+
 from sts2_env.bridge.agent_runner import (
     TERMINAL_PHASES,
+    _select_combat_model_action,
     _phase_for_state,
     _pick_boss_relic_option,
     _pick_card_bundle_index,
@@ -15,6 +19,7 @@ from sts2_env.bridge.agent_runner import (
     _pick_treasure_option,
 )
 from sts2_env.bridge.protocol import BridgeStateType
+from sts2_env.bridge.state_adapter import StateAdapter
 
 
 def test_phase_mapping_treats_run_complete_as_terminal() -> None:
@@ -22,6 +27,38 @@ def test_phase_mapping_treats_run_complete_as_terminal() -> None:
 
     assert phase == BridgeStateType.RUN_COMPLETE
     assert phase in TERMINAL_PHASES
+
+
+def test_combat_model_uses_bridge_observation_and_legal_action_mask() -> None:
+    class Model:
+        def predict(self, observation, *, deterministic, action_masks):
+            assert observation.shape == (217,)
+            assert deterministic is True
+            assert action_masks.tolist() == [True, False]
+            return np.array(0), None
+
+    action = _select_combat_model_action(
+        Model(),
+        StateAdapter(),
+        {"player": {"hp": 1, "max_hp": 1}},
+        np.array([1, 0], dtype=np.int8),
+    )
+
+    assert action == 0
+
+
+def test_combat_model_rejects_an_invalid_action() -> None:
+    class InvalidModel:
+        def predict(self, observation, *, deterministic, action_masks):
+            return np.array(1), None
+
+    with pytest.raises(ValueError, match="illegal action"):
+        _select_combat_model_action(
+            InvalidModel(),
+            StateAdapter(),
+            {"player": {"hp": 1, "max_hp": 1}},
+            np.array([1, 0], dtype=np.int8),
+        )
 
 
 def test_map_policy_prefers_rest_when_hp_is_low() -> None:

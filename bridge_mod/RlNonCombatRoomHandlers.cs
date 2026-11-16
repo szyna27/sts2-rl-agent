@@ -714,6 +714,7 @@ public class RlEventRoomHandler : IRoomHandler, IHandler
                     ["description"] = option.Option.Description.GetFormattedText(),
                     ["enabled"] = !option.Option.IsLocked,
                     ["event_id"] = option.Event.Id.Entry,
+                    ["option_id"] = option.Option.TextKey,
                 }).ToList(),
                 ["floor"] = RunManager.Instance.DebugOnlyGetState().TotalFloor,
                 ["act"] = RunManager.Instance.DebugOnlyGetState().CurrentActIndex + 1,

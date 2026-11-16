@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import sys
@@ -90,6 +92,8 @@ def run_agent(
     verbose: bool = False,
     record_replay_path: str | None = None,
     replay_factory: str | None = None,
+    metagame_model_path: str | None = None,
+    combat_model_path: str | None = None,
 ) -> None:
     """Main agent loop.
 
@@ -102,6 +106,22 @@ def run_agent(
         verbose: Whether to log every action taken.
     """
     adapter = StateAdapter()
+    metagame_agent = None
+    combat_model = None
+    if combat_model_path is not None:
+        try:
+            from sb3_contrib import MaskablePPO
+        except ImportError as exc:
+            raise ImportError(
+                "Loading a combat model requires `uv sync --extra rl`."
+            ) from exc
+        combat_model = MaskablePPO.load(combat_model_path)
+        logger.info("Loaded frozen combat model from %s", combat_model_path)
+    if metagame_model_path is not None:
+        from sts2_env.metagame import MetagameAgent
+
+        metagame_agent = MetagameAgent.load(metagame_model_path)
+        logger.info("Loaded metagame state-value model from %s", metagame_model_path)
 
     logger.info("Connecting to STS2 at %s:%d...", host, port)
 
@@ -184,8 +204,13 @@ def run_agent(
                         client.end_turn()
                         continue
 
-                    valid_actions = np.where(mask)[0]
-                    action_int = int(np.random.choice(valid_actions))
+                    if combat_model is None:
+                        valid_actions = np.where(mask)[0]
+                        action_int = int(np.random.choice(valid_actions))
+                    else:
+                        action_int = _select_combat_model_action(
+                            combat_model, adapter, state, mask
+                        )
 
                     decoded = adapter.decode_action(action_int, state)
 
@@ -206,14 +231,18 @@ def run_agent(
                         )
 
                 elif phase == Phase.MAP_SELECT:
-                    choice = _pick_map_node(state)
+                    choice = _choose_metagame_or_heuristic(
+                        metagame_agent, state, _pick_map_node
+                    )
                     if verbose:
                         logger.info("MAP: choosing node %d", choice)
                     client.choose(choice)
 
                 elif phase == Phase.CARD_REWARD:
                     if msg_type == BridgeStateType.CARD_BUNDLE:
-                        choice = _pick_card_bundle_index(state)
+                        choice = _choose_metagame_or_heuristic(
+                            metagame_agent, state, _pick_card_bundle_index
+                        )
                         if verbose:
                             logger.info("CARD_BUNDLE: choosing bundle %s", choice)
                         client.choose(choice)
@@ -231,42 +260,55 @@ def run_agent(
                         choice = (
                             _pick_reward_screen_option(state)
                             if msg_type == BridgeStateType.REWARD_SCREEN
-                            else _pick_card_reward_index(state)
+                            else _choose_metagame_or_heuristic(
+                                metagame_agent, state, _pick_card_reward_index
+                            )
                         )
                         if verbose:
                             logger.info("CARD_REWARD: choosing option %s", choice)
                         _send_choice_or_skip(client, choice)
 
                 elif phase == Phase.REST:
-                    choice = _pick_rest_option(state)
+                    choice = _choose_metagame_or_heuristic(
+                        metagame_agent, state, _pick_rest_option
+                    )
                     if verbose:
                         logger.info("REST: choosing option %d", choice)
                     client.choose(choice)
 
                 elif phase == Phase.SHOP:
-                    choice = _pick_shop_option(state)
+                    choice = _choose_metagame_or_heuristic(
+                        metagame_agent, state, _pick_shop_option
+                    )
                     if verbose:
                         logger.info("SHOP: choosing option %d", choice)
                     client.choose(choice)
 
                 elif phase == Phase.EVENT:
-                    choice = (
-                        _pick_crystal_sphere_option(state)
+                    fallback = (
+                        _pick_crystal_sphere_option
                         if msg_type == BridgeStateType.CRYSTAL_SPHERE
-                        else _pick_event_option(state)
+                        else _pick_event_option
+                    )
+                    choice = _choose_metagame_or_heuristic(
+                        metagame_agent, state, fallback
                     )
                     if verbose:
                         logger.info("EVENT: choosing option %d", choice)
                     client.choose(choice)
 
                 elif phase == Phase.TREASURE:
-                    choice = _pick_treasure_option(state)
+                    choice = _choose_metagame_or_heuristic(
+                        metagame_agent, state, _pick_treasure_option
+                    )
                     if verbose:
                         logger.info("TREASURE: choosing option %d", choice)
                     client.choose(choice)
 
                 elif phase == Phase.BOSS_RELIC:
-                    choice = _pick_boss_relic_option(state)
+                    choice = _choose_metagame_or_heuristic(
+                        metagame_agent, state, _pick_boss_relic_option
+                    )
                     if verbose:
                         logger.info("BOSS_RELIC: choosing option %d", choice)
                     client.choose(choice)
@@ -299,6 +341,34 @@ def run_agent(
 # ----------------------------------------------------------------
 # Heuristic decision functions for non-combat phases
 # ----------------------------------------------------------------
+
+
+def _choose_metagame_or_heuristic(
+    agent: Any | None,
+    state: dict[str, Any],
+    fallback: Callable[[dict[str, Any]], int | None],
+) -> int | None:
+    if agent is None:
+        return fallback(state)
+    return agent.choose_bridge_option(state)
+
+
+def _select_combat_model_action(
+    model: Any,
+    adapter: StateAdapter,
+    state: dict[str, Any],
+    action_mask: np.ndarray,
+) -> int:
+    observation = adapter.encode_observation(state)
+    action, _ = model.predict(
+        observation,
+        deterministic=True,
+        action_masks=action_mask.astype(np.bool_),
+    )
+    selected = int(np.asarray(action).item())
+    if selected < 0 or selected >= len(action_mask) or not action_mask[selected]:
+        raise ValueError(f"Frozen combat model returned illegal action {selected}")
+    return selected
 
 
 def _phase_for_state(state: dict[str, Any]) -> str:
@@ -669,6 +739,16 @@ def main() -> None:
         default=None,
         help="Optional module:function factory to store in replay metadata for later comparison.",
     )
+    parser.add_argument(
+        "--metagame-model",
+        default=None,
+        help="Optional path to a trained full-run metagame state-value checkpoint.",
+    )
+    parser.add_argument(
+        "--combat-model",
+        default=None,
+        help="Optional path to the frozen MaskablePPO combat model archive.",
+    )
 
     args = parser.parse_args()
 
@@ -684,6 +764,8 @@ def main() -> None:
         verbose=args.verbose,
         record_replay_path=args.record_replay,
         replay_factory=args.replay_factory,
+        metagame_model_path=args.metagame_model,
+        combat_model_path=args.combat_model,
     )
 
 

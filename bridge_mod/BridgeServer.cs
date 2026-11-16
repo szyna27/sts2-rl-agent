@@ -18,8 +18,11 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace STS2BridgeMod;
 
@@ -108,6 +111,7 @@ public class BridgeServer
 
             try
             {
+                stateJson = AttachMetagameContext(stateJson);
                 byte[] data = Encoding.UTF8.GetBytes(stateJson + "\n");
                 _stream.Write(data, 0, data.Length);
                 _stream.Flush();
@@ -120,6 +124,35 @@ public class BridgeServer
                 return false;
             }
         }
+    }
+
+    private static string AttachMetagameContext(string stateJson)
+    {
+        RunState? runState = RunManager.Instance?.DebugOnlyGetState();
+        var player = runState?.Players.FirstOrDefault();
+        if (runState == null || player == null)
+            return stateJson;
+
+        JsonObject state = JsonNode.Parse(stateJson)?.AsObject()
+            ?? throw new InvalidOperationException("Bridge state must be a JSON object.");
+        state["metagame_state"] = JsonSerializer.SerializeToNode(new
+        {
+            character_id = player.Character.Id.Entry,
+            deck = player.Deck.Cards.Select(card => card.Id.Entry).ToArray(),
+            relics = player.Relics.Select(relic => relic.Id.Entry).ToArray(),
+            hp = player.Creature.CurrentHp,
+            max_hp = player.Creature.MaxHp,
+            gold = player.Gold,
+            floor = runState.TotalFloor,
+            act_index = runState.CurrentActIndex,
+            act_floor = runState.ActFloor,
+            keys_to_act4 = 0,
+            ascension = runState.AscensionLevel,
+            boss_ids = runState.Act.AllBossEncounters
+                .Select(encounter => encounter.Id.Entry)
+                .ToArray(),
+        });
+        return state.ToJsonString();
     }
 
     public async Task<string?> SendStateAndWaitForActionAsync(
