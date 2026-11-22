@@ -1,5 +1,6 @@
 """Tests for configurable rewards and RL combat training helpers."""
 
+import csv
 import json
 
 import numpy as np
@@ -9,16 +10,21 @@ from sts2_env.encounters.act1 import (
     setup_fuzzy_wurm_crawler_weak,
     setup_shrinker_beetle_weak,
 )
-from sts2_env.gym_env.combat_env import STS2CombatEnv
+from sts2_env.core.constants import ACTION_END_TURN
 from sts2_env.core.enums import CombatSide
+from sts2_env.gym_env.action_space import action_to_card_and_target, is_potion_action
+from sts2_env.gym_env.combat_env import STS2CombatEnv
 from sts2_env.heuristics import CombatTrace, choose_heuristic_action
 from sts2_env.rl_training import (
+    CardPerformanceTracker,
     CombatTrainingEnv,
     RewardConfig,
     _evaluate_training_policy,
     compute_training_reward,
+    evaluate_training_policy,
     evaluate_policy_against_heuristics,
     load_training_metadata,
+    make_training_env,
     save_training_metadata,
 )
 from sts2_env.rl_training_plotter import plot_training_history, read_training_history
@@ -180,6 +186,12 @@ def test_save_training_metadata_records_reproducibility_config(tmp_path):
         total_timesteps=50_000,
         training_log_dir=tmp_path / "logs",
         run_log_dir=tmp_path / "logs" / "session-1",
+        training_acts=[1, 4, 2, 3],
+        training_stages=[[1, 4], [2], [3]],
+        completed_training_acts=[1, 4],
+        current_training_act=2,
+        current_training_stage=[2],
+        current_act_timesteps=20_000,
     )
 
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -191,6 +203,12 @@ def test_save_training_metadata_records_reproducibility_config(tmp_path):
     ]
     assert metadata["reward_config"]["wasted_block"] == -0.5
     assert metadata["total_timesteps"] == 50_000
+    assert metadata["training_acts"] == [1, 4, 2, 3]
+    assert metadata["training_stages"] == [[1, 4], [2], [3]]
+    assert metadata["completed_training_acts"] == [1, 4]
+    assert metadata["current_training_act"] == 2
+    assert metadata["current_training_stage"] == [2]
+    assert metadata["current_act_timesteps"] == 20_000
     assert metadata["training_log_dir"] == str((tmp_path / "logs").resolve())
     assert metadata["run_log_dir"] == str(
         (tmp_path / "logs" / "session-1").resolve()
@@ -255,6 +273,208 @@ def test_training_env_exposes_episode_total_reward_components():
     assert info["damage_dealt"] >= 0
     assert info["damage_received"] >= 0
     env.close()
+
+
+def test_training_env_reports_encounter_deck_and_played_cards():
+    env = CombatTrainingEnv(
+        STS2CombatEnv(
+            encounter_pool=[setup_shrinker_beetle_weak],
+            training_act=1,
+            max_turns=1,
+        )
+    )
+    try:
+        env.reset(seed=7)
+        combat = env.combat
+        card_action = None
+        played_card = None
+        for action in np.flatnonzero(env.action_masks()):
+            action = int(action)
+            if action == ACTION_END_TURN or is_potion_action(action):
+                continue
+            hand_index, _ = action_to_card_and_target(action)
+            if hand_index is None:
+                continue
+            card = combat.hand[hand_index]
+            if card.card_id.name in {"STRIKE_IRONCLAD", "DEFEND_IRONCLAD", "BASH"}:
+                card_action = action
+                played_card = (card.card_id.name, card.upgraded)
+                break
+        assert card_action is not None
+        assert played_card is not None
+
+        finished_info = None
+        for action in (card_action, ACTION_END_TURN):
+            _, _, terminated, truncated, info = env.step(action)
+            if terminated or truncated:
+                finished_info = info
+                break
+
+        assert finished_info is not None
+        assert finished_info["training_act"] == 1
+        assert finished_info["encounter_id"] == "setup_shrinker_beetle_weak"
+        assert finished_info["encounter_type"] == "weak"
+        assert any(
+            card["card_id"] == played_card[0]
+            and card["upgraded"] is played_card[1]
+            for card in finished_info["cards_in_deck"]
+        )
+        assert any(
+            card["card_id"] == played_card[0]
+            and card["upgraded"] is played_card[1]
+            and card["count"] == 1
+            for card in finished_info["cards_played"]
+        )
+    finally:
+        env.close()
+
+
+def test_card_performance_tracker_separates_encounters_and_act_type_totals(tmp_path):
+    tracker = CardPerformanceTracker()
+    common_deck = [
+        {"card_id": "BASH", "upgraded": False, "count": 1},
+        {"card_id": "STRIKE_IRONCLAD", "upgraded": False, "count": 2},
+    ]
+    tracker.record_episode(
+        {
+            "training_act": 1,
+            "encounter_id": "weak_encounter_a",
+            "encounter_type": "weak",
+            "damage_received": 4,
+            "is_success": True,
+            "cards_in_deck": common_deck,
+            "cards_played": [
+                {"card_id": "BASH", "upgraded": False, "count": 2}
+            ],
+        }
+    )
+    tracker.record_episode(
+        {
+            "training_act": 1,
+            "encounter_id": "weak_encounter_b",
+            "encounter_type": "weak",
+            "damage_received": 8,
+            "is_success": False,
+            "cards_in_deck": common_deck,
+            "cards_played": [],
+        }
+    )
+    tracker.record_episode(
+        {
+            "training_act": 2,
+            "encounter_id": "normal_encounter",
+            "encounter_type": "normal",
+            "damage_received": 10,
+            "is_success": False,
+            "cards_in_deck": common_deck,
+            "cards_played": [],
+        }
+    )
+
+    output_path = tmp_path / "card_performance.csv"
+    tracker.write_csv(output_path)
+    with output_path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+
+    act1_weak_bash = next(
+        row
+        for row in rows
+        if row["scope"] == "act_type"
+        and row["act"] == "1"
+        and row["encounter_type"] == "weak"
+        and row["card_id"] == "BASH"
+    )
+    assert act1_weak_bash["encounter_id"] == "ALL"
+    assert act1_weak_bash["deck_battles"] == "2"
+    assert act1_weak_bash["played_battles"] == "1"
+    assert act1_weak_bash["play_count"] == "2"
+    assert float(act1_weak_bash["mean_hp_lost_in_deck"]) == 6.0
+    assert float(act1_weak_bash["mean_hp_lost_when_played"]) == 4.0
+
+    encounter_a_bash = next(
+        row
+        for row in rows
+        if row["scope"] == "encounter"
+        and row["encounter_id"] == "weak_encounter_a"
+        and row["card_id"] == "BASH"
+    )
+    assert encounter_a_bash["deck_battles"] == "1"
+    assert float(encounter_a_bash["mean_hp_lost_in_deck"]) == 4.0
+
+
+def test_training_env_can_sample_an_act_without_explicit_encounters():
+    pytest.importorskip("stable_baselines3")
+    env = make_training_env(training_act=2)
+    try:
+        env.reset(seed=7)
+        combat = env.unwrapped.combat
+        assert combat is not None
+        assert len(combat.current_player_state.player_state.deck) > 10
+    finally:
+        env.close()
+
+
+def test_training_env_alternates_acts_within_one_stage():
+    pytest.importorskip("stable_baselines3")
+    env = make_training_env(training_acts=[1, 4])
+    try:
+        env.reset(seed=7)
+        first_act = env.unwrapped.current_training_act
+        env.reset()
+        second_act = env.unwrapped.current_training_act
+
+        assert {first_act, second_act} == {1, 4}
+    finally:
+        env.close()
+
+
+def test_training_env_requires_encounters_or_an_act():
+    with pytest.raises(ValueError, match="Provide encounters"):
+        make_training_env()
+
+
+def test_evaluate_training_policy_supports_act_sampling():
+    class EndTurnModel:
+        def predict(self, observation, *, deterministic, action_masks):
+            return np.array(0), None
+
+    metrics = evaluate_training_policy(
+        EndTurnModel(),
+        seeds=[7],
+        training_acts=[1, 4],
+        max_turns=1,
+    )
+
+    assert 0 <= metrics["win_rate"] <= 1
+    assert metrics["mean_turns"] <= 1
+
+
+def test_evaluation_reuses_environment_to_alternate_training_acts(monkeypatch):
+    import sts2_env.rl_training as rl_training
+
+    reset_acts = []
+    original_training_env = rl_training.CombatTrainingEnv
+
+    class TrackingTrainingEnv(original_training_env):
+        def reset(self, *, seed=None, options=None):
+            result = super().reset(seed=seed, options=options)
+            reset_acts.append(self.unwrapped.current_training_act)
+            return result
+
+    class EndTurnModel:
+        def predict(self, observation, *, deterministic, action_masks):
+            return np.flatnonzero(action_masks)[-1], None
+
+    monkeypatch.setattr(rl_training, "CombatTrainingEnv", TrackingTrainingEnv)
+    evaluate_training_policy(
+        EndTurnModel(),
+        seeds=[7, 11],
+        training_acts=[1, 4],
+        max_turns=1,
+    )
+
+    assert len(reset_acts) == 2
+    assert reset_acts[0] != reset_acts[1]
 
 
 def test_training_history_reads_persisted_csv_and_plots(tmp_path):
@@ -371,24 +591,26 @@ def test_training_metrics_callback_persists_episode_and_evaluation_rows(
     monkeypatch.setitem(
         sys.modules, "stable_baselines3.common.callbacks", callbacks
     )
-    monkeypatch.setattr(
-        rl_training,
-        "_evaluate_training_policy",
-        lambda *args, **kwargs: {
+    evaluation_calls = []
+
+    def fake_evaluate(*args, **kwargs):
+        evaluation_calls.append(kwargs)
+        return {
             "mean_reward": 4.0,
             "win_rate": 0.5,
             "mean_turns": 2.0,
             "mean_damage_dealt": 8.0,
             "mean_damage_received": 3.0,
             "mean_wasted_block": 1.0,
-        },
-    )
+        }
+
+    monkeypatch.setattr(rl_training, "_evaluate_training_policy", fake_evaluate)
 
     callback = rl_training.make_training_metrics_callback(
         tmp_path,
-        evaluation_encounters=[setup_shrinker_beetle_weak],
         evaluation_seeds=[7, 11],
         evaluation_interval=2,
+        evaluation_training_act=2,
     )
     callback.model = object()
     callback.locals = {
@@ -396,10 +618,19 @@ def test_training_metrics_callback_persists_episode_and_evaluation_rows(
             {
                 "episode": {"r": 10.0, "l": 8},
                 "is_success": True,
+                "training_act": 2,
+                "encounter_id": "test_encounter",
+                "encounter_type": "normal",
                 "turns": 2,
                 "damage_dealt": 15,
                 "damage_received": 1,
                 "wasted_block": 0,
+                "cards_in_deck": [
+                    {"card_id": "BASH", "upgraded": False, "count": 1}
+                ],
+                "cards_played": [
+                    {"card_id": "BASH", "upgraded": False, "count": 1}
+                ],
                 "reward_damage_dealt": 15.0,
                 "reward_damage_received": -3.0,
                 "reward_turn_penalty": -10.0,
@@ -425,5 +656,20 @@ def test_training_metrics_callback_persists_episode_and_evaluation_rows(
         evaluations = list(csv.DictReader(file))
     assert len(episodes) == 1
     assert episodes[0]["reward_damage_dealt"] == "15.0"
+    assert episodes[0]["training_act"] == "2"
+    with (tmp_path / "card_performance.csv").open(
+        newline="", encoding="utf-8"
+    ) as file:
+        card_metrics = list(csv.DictReader(file))
+    assert any(
+        row["scope"] == "act_type"
+        and row["act"] == "2"
+        and row["encounter_type"] == "normal"
+        and row["card_id"] == "BASH"
+        and row["mean_hp_lost_in_deck"] == "1.0"
+        and row["mean_hp_lost_when_played"] == "1.0"
+        for row in card_metrics
+    )
     assert len(evaluations) == 1
     assert evaluations[0]["win_rate"] == "0.5"
+    assert evaluation_calls[0]["training_act"] == 2

@@ -6,6 +6,7 @@ import csv
 import json
 import math
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ from sts2_env.heuristics import (
     HeuristicName,
     simulate_combat,
 )
+
+CARD_PERFORMANCE_FLUSH_INTERVAL = 25
 
 if TYPE_CHECKING:
     from stable_baselines3.common.callbacks import BaseCallback
@@ -87,6 +90,19 @@ def compute_training_reward(
     )
 
 
+def _serialize_card_counts(
+    card_counts: Mapping[tuple[str, bool], int],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "card_id": card_id,
+            "upgraded": upgraded,
+            "count": count,
+        }
+        for (card_id, upgraded), count in sorted(card_counts.items())
+    ]
+
+
 class CombatTrainingEnv(gymnasium.Wrapper):
     """Apply configurable shaping rewards without changing combat semantics."""
 
@@ -102,6 +118,11 @@ class CombatTrainingEnv(gymnasium.Wrapper):
         self._episode_damage_received = 0
         self._episode_wasted_block = 0
         self._episode_reward_components: dict[str, float] = {}
+        self._episode_training_act: int | None = None
+        self._episode_encounter_id = ""
+        self._episode_encounter_type = ""
+        self._episode_cards_in_deck: Counter[tuple[str, bool]] = Counter()
+        self._episode_cards_played: Counter[tuple[str, bool]] = Counter()
 
     @property
     def combat(self) -> CombatState:
@@ -118,10 +139,18 @@ class CombatTrainingEnv(gymnasium.Wrapper):
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         observation, info = self.env.reset(seed=seed, options=options)
+        training_env = self.unwrapped
+        if not isinstance(training_env, STS2CombatEnv):
+            raise RuntimeError("CombatTrainingEnv must wrap an STS2CombatEnv")
         self._charged_turns = 0
         self._episode_damage_dealt = 0
         self._episode_damage_received = 0
         self._episode_wasted_block = 0
+        self._episode_training_act = training_env.current_training_act
+        self._episode_encounter_id = training_env.current_encounter_id or ""
+        self._episode_encounter_type = training_env.current_encounter_type or "custom"
+        self._episode_cards_in_deck = Counter(training_env.current_deck_cards)
+        self._episode_cards_played = Counter()
         self._episode_reward_components = {
             name: 0.0 for name in RewardBreakdown.__dataclass_fields__
         }
@@ -131,10 +160,13 @@ class CombatTrainingEnv(gymnasium.Wrapper):
         combat_before = self.combat
         damage_start = len(combat_before._damage_results_combat)
         block_start = len(combat_before._block_clear_events_combat)
+        played_cards_start = len(combat_before._played_cards_combat)
         turn_count_before = combat_before.turn_count
 
         observation, _, terminated, truncated, info = self.env.step(action)
         combat_after = self.combat
+        for card in combat_after._played_cards_combat[played_cards_start:]:
+            self._episode_cards_played[(card.card_id.name, card.upgraded)] += 1
         new_damage_events = combat_after._damage_results_combat[damage_start:]
         damage_dealt = sum(
             result.hp_lost
@@ -181,6 +213,15 @@ class CombatTrainingEnv(gymnasium.Wrapper):
                     "damage_received": int(self._episode_damage_received),
                     "wasted_block": int(self._episode_wasted_block),
                     "turns": int(self._charged_turns),
+                    "training_act": self._episode_training_act,
+                    "encounter_id": self._episode_encounter_id,
+                    "encounter_type": self._episode_encounter_type,
+                    "cards_in_deck": _serialize_card_counts(
+                        self._episode_cards_in_deck
+                    ),
+                    "cards_played": _serialize_card_counts(
+                        self._episode_cards_played
+                    ),
                 }
             )
             info["damage_dealt"] = int(self._episode_damage_dealt)
@@ -190,16 +231,18 @@ class CombatTrainingEnv(gymnasium.Wrapper):
 
 
 def make_training_env(
-    encounters: Sequence[EncounterSetup],
+    encounters: Sequence[EncounterSetup] | None = None,
     *,
+    training_act: int | None = None,
+    training_acts: Sequence[int] | None = None,
     character_id: str = "Ironclad",
     reward_config: RewardConfig | None = None,
     max_turns: int = 200,
     log_dir: str | Path | None = None,
 ) -> gymnasium.Wrapper:
-    """Build a training environment that samples uniformly from encounters."""
-    if not encounters:
-        raise ValueError("Provide at least one encounter for training")
+    """Build a training environment for an encounter pool or one/more acts."""
+    if not encounters and training_act is None and training_acts is None:
+        raise ValueError("Provide encounters, a training_act, or training_acts")
     try:
         from stable_baselines3.common.monitor import Monitor
     except ImportError as exc:
@@ -209,7 +252,9 @@ def make_training_env(
         ) from exc
 
     env = STS2CombatEnv(
-        encounter_pool=list(encounters),
+        encounter_pool=list(encounters) if encounters else None,
+        training_act=training_act,
+        training_acts=training_acts,
         character_id=character_id,
         max_turns=max_turns,
     )
@@ -225,6 +270,9 @@ def make_training_env(
         filename=monitor_path,
         info_keywords=(
             "is_success",
+            "training_act",
+            "encounter_id",
+            "encounter_type",
             "turns",
             "damage_dealt",
             "damage_received",
@@ -247,16 +295,18 @@ def create_training_run_dir(log_root: str | Path) -> Path:
 
 def _evaluate_training_policy(
     model: Any,
-    encounters: Sequence[EncounterSetup],
+    encounters: Sequence[EncounterSetup] | None,
     seeds: Sequence[int],
     *,
     character_id: str,
     reward_config: RewardConfig,
     max_turns: int,
+    training_act: int | None = None,
+    training_acts: Sequence[int] | None = None,
 ) -> dict[str, float]:
     """Evaluate a policy on fixed pairs and summarize combat outcomes."""
-    if not encounters or not seeds:
-        raise ValueError("Periodic evaluation needs encounters and seeds")
+    if (not encounters and training_act is None and training_acts is None) or not seeds:
+        raise ValueError("Periodic evaluation needs encounters or an act selection, and seeds")
 
     metrics: dict[str, list[float]] = {
         "reward": [],
@@ -266,44 +316,67 @@ def _evaluate_training_policy(
         "damage_received": [],
         "wasted_block": [],
     }
-    for index, seed in enumerate(seeds):
-        env = CombatTrainingEnv(
+    shared_env = None
+    if training_acts is not None:
+        shared_env = CombatTrainingEnv(
             STS2CombatEnv(
-                encounter_pool=[encounters[index % len(encounters)]],
+                training_acts=training_acts,
                 character_id=character_id,
                 max_turns=max_turns,
             ),
             reward_config,
         )
-        try:
-            observation, _ = env.reset(seed=int(seed))
-            total_reward = 0.0
-            for _ in range(max_turns * 10):
-                action, _ = model.predict(
-                    observation,
-                    deterministic=True,
-                    action_masks=env.action_masks(),
+    try:
+        for index, seed in enumerate(seeds):
+            env = shared_env
+            if env is None:
+                encounter_pool = (
+                    [encounters[index % len(encounters)]]
+                    if encounters
+                    else None
                 )
-                observation, reward, terminated, truncated, info = env.step(
-                    int(np.asarray(action).item())
+                env = CombatTrainingEnv(
+                    STS2CombatEnv(
+                        encounter_pool=encounter_pool,
+                        training_act=training_act,
+                        character_id=character_id,
+                        max_turns=max_turns,
+                    ),
+                    reward_config,
                 )
-                total_reward += reward
-                if terminated or truncated:
-                    metrics["reward"].append(total_reward)
-                    metrics["win"].append(float(info["is_success"]))
-                    metrics["turns"].append(float(info["turns"]))
-                    metrics["damage_dealt"].append(float(info["damage_dealt"]))
-                    metrics["damage_received"].append(
-                        float(info["damage_received"])
+            try:
+                observation, _ = env.reset(seed=int(seed))
+                total_reward = 0.0
+                for _ in range(max_turns * 10):
+                    action, _ = model.predict(
+                        observation,
+                        deterministic=True,
+                        action_masks=env.action_masks(),
                     )
-                    metrics["wasted_block"].append(float(info["wasted_block"]))
-                    break
-            else:
-                raise RuntimeError(
-                    f"Evaluation episode exceeded {max_turns * 10} environment steps"
-                )
-        finally:
-            env.close()
+                    observation, reward, terminated, truncated, info = env.step(
+                        int(np.asarray(action).item())
+                    )
+                    total_reward += reward
+                    if terminated or truncated:
+                        metrics["reward"].append(total_reward)
+                        metrics["win"].append(float(info["is_success"]))
+                        metrics["turns"].append(float(info["turns"]))
+                        metrics["damage_dealt"].append(float(info["damage_dealt"]))
+                        metrics["damage_received"].append(
+                            float(info["damage_received"])
+                        )
+                        metrics["wasted_block"].append(float(info["wasted_block"]))
+                        break
+                else:
+                    raise RuntimeError(
+                        f"Evaluation episode exceeded {max_turns * 10} environment steps"
+                    )
+            finally:
+                if shared_env is None:
+                    env.close()
+    finally:
+        if shared_env is not None:
+            shared_env.close()
 
     return {
         "mean_reward": float(np.mean(metrics["reward"])),
@@ -315,12 +388,176 @@ def _evaluate_training_policy(
     }
 
 
+def evaluate_training_policy(
+    model: Any,
+    seeds: Sequence[int],
+    *,
+    encounters: Sequence[EncounterSetup] | None = None,
+    training_act: int | None = None,
+    training_acts: Sequence[int] | None = None,
+    character_id: str = "Ironclad",
+    reward_config: RewardConfig | None = None,
+    max_turns: int = 200,
+) -> dict[str, float]:
+    """Evaluate a policy on fixed seeds for an encounter pool or act sequence."""
+    return _evaluate_training_policy(
+        model,
+        encounters,
+        seeds,
+        character_id=character_id,
+        reward_config=reward_config or RewardConfig(),
+        max_turns=max_turns,
+        training_act=training_act,
+        training_acts=training_acts,
+    )
+
+
+class CardPerformanceTracker:
+    """Aggregate HP loss by card, act, and exact or act/type encounter group."""
+
+    fieldnames = (
+        "scope",
+        "act",
+        "encounter_type",
+        "encounter_id",
+        "card_id",
+        "upgraded",
+        "deck_battles",
+        "deck_copies",
+        "played_battles",
+        "play_count",
+        "mean_hp_lost_in_deck",
+        "mean_hp_lost_when_played",
+    )
+
+    def __init__(self) -> None:
+        self._totals: dict[tuple[str, str, str, str, str, bool], dict[str, int]] = {}
+
+    def record_episode(self, info: Mapping[str, Any]) -> None:
+        required_fields = {
+            "training_act",
+            "encounter_id",
+            "encounter_type",
+            "damage_received",
+            "cards_in_deck",
+            "cards_played",
+        }
+        missing_fields = required_fields - info.keys()
+        if missing_fields:
+            raise ValueError(
+                f"Episode info is missing card-performance fields: {sorted(missing_fields)}"
+            )
+
+        deck_counts = self._read_card_counts(info["cards_in_deck"])
+        play_counts = self._read_card_counts(info["cards_played"])
+        card_keys = deck_counts.keys() | play_counts.keys()
+        act = "" if info["training_act"] is None else str(info["training_act"])
+        encounter_id = str(info["encounter_id"])
+        encounter_type = str(info["encounter_type"])
+        hp_lost = int(info["damage_received"])
+        if hp_lost < 0:
+            raise ValueError("damage_received must be non-negative")
+
+        for card_id, upgraded in card_keys:
+            deck_copies = deck_counts.get((card_id, upgraded), 0)
+            play_count = play_counts.get((card_id, upgraded), 0)
+            for scope, group_encounter_id in (
+                ("encounter", encounter_id),
+                ("act_type", "ALL"),
+            ):
+                key = (
+                    scope,
+                    act,
+                    encounter_type,
+                    group_encounter_id,
+                    card_id,
+                    upgraded,
+                )
+                totals = self._totals.setdefault(
+                    key,
+                    {
+                        "deck_battles": 0,
+                        "deck_copies": 0,
+                        "played_battles": 0,
+                        "play_count": 0,
+                        "hp_lost_in_deck": 0,
+                        "hp_lost_when_played": 0,
+                    },
+                )
+                if deck_copies:
+                    totals["deck_battles"] += 1
+                    totals["deck_copies"] += deck_copies
+                    totals["hp_lost_in_deck"] += hp_lost
+                if play_count:
+                    totals["played_battles"] += 1
+                    totals["play_count"] += play_count
+                    totals["hp_lost_when_played"] += hp_lost
+
+    @staticmethod
+    def _read_card_counts(
+        card_entries: Sequence[Mapping[str, Any]],
+    ) -> Counter[tuple[str, bool]]:
+        counts: Counter[tuple[str, bool]] = Counter()
+        for entry in card_entries:
+            card_id = str(entry["card_id"])
+            upgraded = bool(entry["upgraded"])
+            count = int(entry["count"])
+            if count <= 0:
+                raise ValueError("Card counts must be positive")
+            counts[(card_id, upgraded)] += count
+        return counts
+
+    def write_csv(self, path: str | Path) -> None:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=self.fieldnames)
+            writer.writeheader()
+            for key, totals in sorted(self._totals.items()):
+                (
+                    scope,
+                    act,
+                    encounter_type,
+                    encounter_id,
+                    card_id,
+                    upgraded,
+                ) = key
+                deck_battles = totals["deck_battles"]
+                played_battles = totals["played_battles"]
+                writer.writerow(
+                    {
+                        "scope": scope,
+                        "act": act,
+                        "encounter_type": encounter_type,
+                        "encounter_id": encounter_id,
+                        "card_id": card_id,
+                        "upgraded": upgraded,
+                        "deck_battles": deck_battles,
+                        "deck_copies": totals["deck_copies"],
+                        "played_battles": played_battles,
+                        "play_count": totals["play_count"],
+                        "mean_hp_lost_in_deck": (
+                            totals["hp_lost_in_deck"] / deck_battles
+                            if deck_battles
+                            else ""
+                        ),
+                        "mean_hp_lost_when_played": (
+                            totals["hp_lost_when_played"] / played_battles
+                            if played_battles
+                            else ""
+                        ),
+                    }
+                )
+
+
 def make_training_metrics_callback(
     log_dir: str | Path,
     *,
-    evaluation_encounters: Sequence[EncounterSetup],
+    evaluation_encounters: Sequence[EncounterSetup] | None = None,
     evaluation_seeds: Sequence[int],
     evaluation_interval: int,
+    evaluation_training_act: int | None = None,
+    evaluation_training_acts: Sequence[int] | None = None,
     character_id: str = "Ironclad",
     reward_config: RewardConfig | None = None,
     max_turns: int = 200,
@@ -329,8 +566,12 @@ def make_training_metrics_callback(
     """Persist episode metrics and periodically evaluate the policy."""
     if evaluation_interval <= 0 or start_timesteps < 0:
         raise ValueError("evaluation_interval must be positive and start_timesteps non-negative")
-    if not evaluation_encounters or not evaluation_seeds:
-        raise ValueError("Provide evaluation encounters and seeds")
+    if (
+        not evaluation_encounters
+        and evaluation_training_act is None
+        and evaluation_training_acts is None
+    ) or not evaluation_seeds:
+        raise ValueError("Provide evaluation encounters or an act selection, and evaluation seeds")
     try:
         from stable_baselines3.common.callbacks import BaseCallback
     except ImportError as exc:
@@ -346,6 +587,9 @@ def make_training_metrics_callback(
         "reward",
         "length",
         "is_success",
+        "training_act",
+        "encounter_id",
+        "encounter_type",
         "turns",
         "damage_dealt",
         "damage_received",
@@ -374,6 +618,8 @@ def make_training_metrics_callback(
             self.evaluation_file: Any = None
             self.episode_writer: Any = None
             self.evaluation_writer: Any = None
+            self.card_performance = CardPerformanceTracker()
+            self.completed_episodes = 0
             self.next_evaluation = (
                 start_timesteps // evaluation_interval + 1
             ) * evaluation_interval
@@ -395,12 +641,19 @@ def make_training_metrics_callback(
             self.evaluation_writer.writeheader()
             self.episode_file.flush()
             self.evaluation_file.flush()
+            self.card_performance.write_csv(run_dir / "card_performance.csv")
 
         def _on_step(self) -> bool:
             for info in self.locals.get("infos", []):
                 episode = info.get("episode")
                 if episode is None:
                     continue
+                self.card_performance.record_episode(info)
+                self.completed_episodes += 1
+                if self.completed_episodes % CARD_PERFORMANCE_FLUSH_INTERVAL == 0:
+                    self.card_performance.write_csv(
+                        run_dir / "card_performance.csv"
+                    )
                 row = {
                     "timesteps": self.num_timesteps,
                     "reward": episode["r"],
@@ -413,7 +666,11 @@ def make_training_metrics_callback(
                 self.episode_writer.writerow(row)
                 self.episode_file.flush()
                 for field in episode_fields[1:]:
-                    if field in row:
+                    if field in row and field not in {
+                        "training_act",
+                        "encounter_id",
+                        "encounter_type",
+                    }:
                         self.logger.record_mean(f"combat/{field}", float(row[field]))
                 self.logger.record_mean(
                     "combat/win_rate", float(info["is_success"])
@@ -427,6 +684,8 @@ def make_training_metrics_callback(
                     character_id=character_id,
                     reward_config=reward_config or RewardConfig(),
                     max_turns=max_turns,
+                    training_act=evaluation_training_act,
+                    training_acts=evaluation_training_acts,
                 )
                 row = {
                     "timesteps": self.num_timesteps,
@@ -441,6 +700,7 @@ def make_training_metrics_callback(
             return True
 
         def _on_training_end(self) -> None:
+            self.card_performance.write_csv(run_dir / "card_performance.csv")
             if self.episode_file is not None:
                 self.episode_file.close()
             if self.evaluation_file is not None:
@@ -523,38 +783,56 @@ def save_training_metadata(
     path: str | Path,
     *,
     character_id: str,
-    encounters: Sequence[EncounterSetup],
+    encounters: Sequence[EncounterSetup] | None,
     reward_config: RewardConfig,
     seed: int,
     total_timesteps: int,
     training_log_dir: str | Path | None = None,
     run_log_dir: str | Path | None = None,
+    training_acts: Sequence[int] | None = None,
+    training_stages: Sequence[Sequence[int]] | None = None,
+    completed_training_acts: Sequence[int] | None = None,
+    current_training_act: int | None = None,
+    current_training_stage: Sequence[int] | None = None,
+    current_act_timesteps: int = 0,
 ) -> Path:
     """Save reproducibility metadata beside a trained policy."""
     metadata_path = Path(path)
     if metadata_path.suffix == ".zip":
         metadata_path = metadata_path.with_suffix(".json")
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "character_id": character_id,
+        "encounters": [
+            getattr(encounter, "__name__", type(encounter).__name__)
+            for encounter in (encounters or ())
+        ],
+        "reward_config": asdict(reward_config),
+        "seed": seed,
+        "total_timesteps": total_timesteps,
+        "training_log_dir": (
+            str(Path(training_log_dir).resolve())
+            if training_log_dir is not None
+            else None
+        ),
+        "run_log_dir": (
+            str(Path(run_log_dir).resolve()) if run_log_dir is not None else None
+        ),
+    }
+    if training_acts is not None:
+        metadata["training_acts"] = list(training_acts)
+    if training_stages is not None:
+        metadata["training_stages"] = [list(stage) for stage in training_stages]
+    if completed_training_acts is not None:
+        metadata["completed_training_acts"] = list(completed_training_acts)
+    if current_training_act is not None:
+        metadata["current_training_act"] = current_training_act
+    if current_training_stage is not None:
+        metadata["current_training_stage"] = list(current_training_stage)
+    metadata["current_act_timesteps"] = current_act_timesteps
     metadata_path.write_text(
         json.dumps(
-            {
-                "character_id": character_id,
-                "encounters": [
-                    getattr(encounter, "__name__", type(encounter).__name__)
-                    for encounter in encounters
-                ],
-                "reward_config": asdict(reward_config),
-                "seed": seed,
-                "total_timesteps": total_timesteps,
-                "training_log_dir": (
-                    str(Path(training_log_dir).resolve())
-                    if training_log_dir is not None
-                    else None
-                ),
-                "run_log_dir": (
-                    str(Path(run_log_dir).resolve()) if run_log_dir is not None else None
-                ),
-            },
+            metadata,
             indent=2,
         )
         + "\n",

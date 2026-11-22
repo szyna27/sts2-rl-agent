@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 import gymnasium
 import numpy as np
@@ -12,7 +13,13 @@ from sts2_env.cards.base import reset_instance_counter
 from sts2_env.core.combat import CombatState
 from sts2_env.core.constants import ACTION_END_TURN, ACTION_SPACE_SIZE, IRONCLAD_STARTING_HP
 from sts2_env.encounters.act1 import ALL_ACT1_ENCOUNTERS, EncounterSetup
+from sts2_env.encounters.room_set import (
+    ROOM_TYPE_BOSS,
+    ROOM_TYPE_ELITE,
+    EncounterSpec,
+)
 from sts2_env.core.rng import INT_MAX_EXCLUSIVE, Rng
+from sts2_env.gym_env.deck_builder import build_training_deck
 from sts2_env.gym_env.action_space import (
     action_to_card_and_target,
     action_to_potion_and_target,
@@ -51,6 +58,8 @@ class STS2CombatEnv(gymnasium.Env):
         player_max_hp: int | None = None,
         max_turns: int = 200,
         render_mode: str | None = None,
+        training_act: int | None = None,
+        training_acts: Sequence[int] | None = None,
     ):
         super().__init__()
         self.observation_space = spaces.Box(
@@ -58,6 +67,25 @@ class STS2CombatEnv(gymnasium.Env):
         )
         self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
         self.encounter_pool = encounter_pool or ALL_ACT1_ENCOUNTERS
+        if training_act is not None and training_acts is not None:
+            raise ValueError("Set training_act or training_acts, not both")
+        if training_act is not None and training_act not in {1, 2, 3, 4}:
+            raise ValueError(f"Unsupported training_act: {training_act}")
+        if training_acts is not None:
+            if not training_acts or any(act not in {1, 2, 3, 4} for act in training_acts):
+                raise ValueError("training_acts must contain acts from 1 through 4")
+            if len(set(training_acts)) != len(training_acts):
+                raise ValueError("training_acts must not contain duplicates")
+            if encounter_pool is not None:
+                raise ValueError("training_acts cannot be combined with a custom encounter_pool")
+        self.training_act = training_act
+        self.training_acts = tuple(training_acts or ())
+        self.current_training_act: int | None = training_act
+        self.current_encounter_id: str | None = None
+        self.current_encounter_type: str | None = None
+        self.current_deck_cards: tuple[tuple[str, bool], ...] = ()
+        self._last_training_act_index: int | None = None
+        self._custom_encounter_pool = encounter_pool is not None
         self.character_id = character_id
         default_hp = {
             "Ironclad": IRONCLAD_STARTING_HP,
@@ -88,16 +116,68 @@ class STS2CombatEnv(gymnasium.Env):
         rng_seed = int(self.np_random.integers(0, INT_MAX_EXCLUSIVE))
         rng = Rng(rng_seed)
 
-        deck_factories = {
-            "Ironclad": "ironclad",
-            "Silent": "silent",
-            "Defect": "defect",
-            "Necrobinder": "necrobinder",
-            "Regent": "regent",
-        }
-        module_name = deck_factories[self.character_id]
-        module = __import__(f"sts2_env.cards.{module_name}", fromlist=["starter"])
-        deck = getattr(module, f"create_{module_name}_starter_deck")()
+        selected_training_act = self.training_act
+        if self.training_acts:
+            if self._last_training_act_index is None:
+                self._last_training_act_index = int(
+                    self.np_random.integers(0, len(self.training_acts))
+                )
+            else:
+                self._last_training_act_index = (
+                    self._last_training_act_index + 1
+                ) % len(self.training_acts)
+            selected_training_act = self.training_acts[self._last_training_act_index]
+        self.current_training_act = selected_training_act
+
+        encounter_type = "custom"
+        if selected_training_act is None:
+            encounter_idx = int(self.np_random.integers(0, len(self.encounter_pool)))
+            encounter_setup = self.encounter_pool[encounter_idx]
+            deck_factories = {
+                "Ironclad": "ironclad",
+                "Silent": "silent",
+                "Defect": "defect",
+                "Necrobinder": "necrobinder",
+                "Regent": "regent",
+            }
+            module_name = deck_factories[self.character_id]
+            module = __import__(f"sts2_env.cards.{module_name}", fromlist=["starter"])
+            deck = getattr(module, f"create_{module_name}_starter_deck")()
+            encounter_specs = None
+        else:
+            encounter_specs = self._get_training_encounter_specs(selected_training_act)
+            if self._custom_encounter_pool:
+                encounter_setups = self.encounter_pool
+            else:
+                encounter_setups = [spec.setup for spec in encounter_specs]
+            encounter_idx = int(self.np_random.integers(0, len(encounter_setups)))
+            encounter_setup = encounter_setups[encounter_idx]
+            encounter_spec = next(
+                (spec for spec in encounter_specs if spec.setup is encounter_setup),
+                None,
+            )
+            encounter_type = "normal"
+            if encounter_spec is not None:
+                if encounter_spec.room_type == ROOM_TYPE_BOSS:
+                    encounter_type = "boss"
+                elif encounter_spec.room_type == ROOM_TYPE_ELITE:
+                    encounter_type = "elite"
+                elif encounter_spec.is_weak:
+                    encounter_type = "weak"
+            deck = build_training_deck(
+                self.character_id,
+                selected_training_act,
+                encounter_type,
+                rng,
+            )
+
+        self.current_encounter_id = getattr(
+            encounter_setup, "__name__", type(encounter_setup).__name__
+        )
+        self.current_encounter_type = encounter_type
+        self.current_deck_cards = tuple(
+            (card.card_id.name, card.upgraded) for card in deck
+        )
 
         # Create combat
         self.combat = CombatState(
@@ -109,16 +189,52 @@ class STS2CombatEnv(gymnasium.Env):
         )
 
         # Setup encounter
-        encounter_idx = int(self.np_random.integers(0, len(self.encounter_pool)))
-        encounter_setup = self.encounter_pool[encounter_idx]
         encounter_setup(self.combat, rng)
 
         # Start combat
         self.combat.start_combat()
 
         obs = encode_observation(self.combat)
-        info = {"action_mask": get_action_mask(self.combat)}
+        info = {
+            "action_mask": get_action_mask(self.combat),
+            "training_act": self.current_training_act,
+            "encounter_id": self.current_encounter_id,
+            "encounter_type": self.current_encounter_type,
+        }
         return obs, info
+
+    def _get_training_encounter_specs(self, training_act: int) -> list[EncounterSpec]:
+        if training_act == 1:
+            from sts2_env.encounters.act1 import ALL_ENCOUNTER_SPECS
+        elif training_act == 2:
+            from sts2_env.encounters.act2 import ALL_ENCOUNTER_SPECS
+        elif training_act == 3:
+            from sts2_env.encounters.act3 import ALL_ENCOUNTER_SPECS
+        else:
+            from sts2_env.encounters.act4 import (
+                BOSS_ENCOUNTERS,
+                ELITE_ENCOUNTERS,
+                NORMAL_ENCOUNTERS,
+                WEAK_ENCOUNTERS,
+            )
+            from sts2_env.encounters.room_set import (
+                ROOM_TYPE_BOSS as ACT4_ROOM_TYPE_BOSS,
+                ROOM_TYPE_ELITE as ACT4_ROOM_TYPE_ELITE,
+            )
+
+            return (
+                [EncounterSpec(setup, is_weak=True) for setup in WEAK_ENCOUNTERS]
+                + [EncounterSpec(setup) for setup in NORMAL_ENCOUNTERS]
+                + [
+                    EncounterSpec(setup, room_type=ACT4_ROOM_TYPE_ELITE)
+                    for setup in ELITE_ENCOUNTERS
+                ]
+                + [
+                    EncounterSpec(setup, room_type=ACT4_ROOM_TYPE_BOSS)
+                    for setup in BOSS_ENCOUNTERS
+                ]
+            )
+        return ALL_ENCOUNTER_SPECS
 
     def step(self, action: int):
         if self._episode_ended:

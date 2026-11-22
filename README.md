@@ -2,6 +2,8 @@
 
 A reinforcement learning agent for **Slay the Spire 2**, built on a high-performance headless combat simulator and a Gymnasium training environment. Includes a C# bridge mod for connecting the trained agent to the real game.
 
+See [TRAINING_PLAN.md](TRAINING_PLAN.md) for the combined Combat AI and metagame training plan and current implementation status.
+
 ## Architecture
 
 ```
